@@ -1,5 +1,4 @@
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
-const qrcode = require('qrcode-terminal');
 const axios = require('axios');
 const pino = require('pino');
 const cron = require('node-cron');
@@ -7,13 +6,16 @@ const fs = require('fs');
 
 const API_URL = 'https://script.google.com/macros/s/AKfycbzrgUNXaXz4NGbod6OMqBJ0Ieo0AJgD5kZMIrRUyNL8ey2xhKW0N0J-hXTV5C40VpP67g/exec';
 
+// UBAH BAGIAN INI: Masukkan nomor WA bot Anda dengan awalan 62 (tanpa 0 atau +)
+const NOMOR_BOT = '085956143731'; 
+
 const WAKTU_5_MENIT = 5 * 60 * 1000;
 const WAKTU_24_JAM = 24 * 60 * 60 * 1000;
 
 const userSessions = {};
 const searchCache = {};
 
-// MEMORI PENYIMPANAN MULTI-GRUP (Otomatis menyimpan ID grup tempat bot berada)
+// MEMORI PENYIMPANAN MULTI-GRUP
 const GROUPS_FILE = './registered_groups.json';
 let registeredGroups = [];
 
@@ -36,33 +38,43 @@ async function startBot() {
     const sock = makeWASocket({
         auth: state,
         printQRInTerminal: false,
-        logger: pino({ level: 'silent' })
+        logger: pino({ level: 'silent' }),
+        browser: ['Ubuntu', 'Chrome', '20.0.04'] // Wajib untuk fitur Pairing Code
     });
+
+    // MEMINTA KODE TAUTAN JIKA BELUM LOGIN
+    if (!sock.authState.creds.registered) {
+        setTimeout(async () => {
+            try {
+                let code = await sock.requestPairingCode(NOMOR_BOT);
+                // Memecah kode jadi format ABCD-EFGH agar mudah dibaca
+                code = code?.match(/.{1,4}/g)?.join("-") || code; 
+                console.log('\n==================================================');
+                console.log('  KODE TAUTAN (PAIRING CODE) ANDA: ' + code);
+                console.log('  Masukkan kode ini di aplikasi WhatsApp HP Anda.');
+                console.log('==================================================\n');
+            } catch (e) {
+                console.error('Gagal mendapatkan kode tautan:', e);
+            }
+        }, 3000);
+    }
 
     sock.ev.on('creds.update', saveCreds);
 
     sock.ev.on('connection.update', (update) => {
-        const { connection, lastDisconnect, qr } = update;
-        if (qr) {
-            console.clear();
-            console.log('\n==================================================');
-            console.log('  SCAN QR CODE DI BAWAH INI MENGGUNAKAN WHATSAPP');
-            console.log('==================================================\n');
-            qrcode.generate(qr, { small: true });
-        }
+        const { connection, lastDisconnect } = update;
         if (connection === 'close') {
             const shouldReconnect = (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
             if (shouldReconnect) {
                 console.log('Koneksi terputus, mencoba menghubungkan ulang...');
-                startBot();
+                setTimeout(startBot, 5000);
             } else {
                 console.log('⚠️ Sesi terputus (Logged Out). Hapus folder sesi_wa dan jalankan ulang.');
             }
         } else if (connection === 'open') {
-            console.clear();
-            console.log('==============================================');
+            console.log('\n==============================================');
             console.log('  ✅ BOT WHATSAPP KAS AKTIF & SIAP PAKAI!');
-            console.log('==============================================');
+            console.log('==============================================\n');
         }
     });
 
@@ -99,7 +111,6 @@ async function startBot() {
                 msg += `\n💡 _Bagi rekan-rekan yang namanya tertera di atas, silakan hubungi atau lakukan pembayaran ke *Pengurus Kas* agar pencatatan keuangan tetap rapi._\n`;
                 msg += `📲 _Gunakan perintah /cek <nama> di grup ini untuk memeriksa rincian pembayaran pribadi._`;
 
-                // Kirim ke seluruh grup yang terdaftar
                 for (const groupId of registeredGroups) {
                     kirimDanHapus(groupId, msg, WAKTU_24_JAM);
                 }
@@ -119,12 +130,10 @@ async function startBot() {
 
         if (!text) return;
 
-        // OTOMATIS SIMPAN ID GRUP SAAT ADA AKTIVITAS DI GRUP
         if (isGroup) {
             saveGroup(sender);
         }
 
-        // BALASAN ANGKA /CEK
         if (!text.startsWith('/') && searchCache[sender]) {
             const choice = parseInt(text);
             const list = searchCache[sender];
@@ -146,7 +155,6 @@ async function startBot() {
 
         if (!text.startsWith('/')) return;
 
-        // INSTANT CLEAN PESAN PERINTAH
         if (isGroup) {
             sock.sendMessage(sender, { delete: msg.key }).catch(()=>{});
         }
@@ -154,7 +162,6 @@ async function startBot() {
         const args = text.slice(1).trim().split(/ +/);
         const command = args.shift().toLowerCase();
 
-        // 1. MENU
         if (command === 'menu' || command === 'help') {
             const isEditor = !!userSessions[sender];
             let helpText = "📌 *MENU BANTUAN*\n\n";
@@ -182,7 +189,6 @@ async function startBot() {
             return kirimDanHapus(sender, helpText, WAKTU_5_MENIT);
         }
 
-        // 2. DASHBOARD
         else if (command === 'dashboard') {
             try {
                 const res = await axios.get(`${API_URL}?action=dashboard`);
@@ -209,7 +215,6 @@ async function startBot() {
             }
         }
 
-        // 3. PEMASUKAN
         else if (command === 'pemasukan') {
             try {
                 const res = await axios.get(`${API_URL}?action=detailPemasukan`);
@@ -227,7 +232,6 @@ async function startBot() {
             }
         }
 
-        // 4. PENGELUARAN
         else if (command === 'pengeluaran') {
             try {
                 const res = await axios.get(`${API_URL}?action=detailPengeluaran`);
@@ -245,7 +249,6 @@ async function startBot() {
             }
         }
 
-        // 5. CEK NAMA
         else if (command === 'cek') {
             const query = args.join(' ').toLowerCase();
             if (!query) return kirimDanHapus(sender, "Gunakan format: `/cek <nama>`", WAKTU_5_MENIT);
@@ -279,7 +282,6 @@ async function startBot() {
             }
         }
 
-        // 6. MENUNGGAK
         else if (command === 'menunggak') {
             try {
                 const res = await axios.get(`${API_URL}?action=monitoring`);
@@ -300,7 +302,6 @@ async function startBot() {
             }
         }
 
-        // 7. LOGIN EDITOR
         else if (command === 'login') {
             if (isGroup) {
                 return kirimDanHapus(sender, "⚠️ Perintah `/login` wajib via Chat Pribadi (DM)!", WAKTU_5_MENIT);
@@ -323,7 +324,6 @@ async function startBot() {
             }
         }
 
-        // --- PANEL EDITOR ---
         else if (['opsi_editor', 'iuran', 'catat_pengeluaran', 'tambah_anggota', 'edit_anggota', 'set_iuran', 'set_ho', 'ganti_password', 'logout'].includes(command)) {
             const token = userSessions[sender];
             if (!token) return kirimDanHapus(sender, "❌ Akses Ditolak! Login dulu via DM.", WAKTU_5_MENIT);
@@ -351,7 +351,6 @@ async function startBot() {
                 }
             }
 
-            // INPUT IURAN (MULTI-GRUP)
             else if (command === 'iuran') {
                 const nama = args[0];
                 const nominal = args[1];
@@ -377,7 +376,6 @@ async function startBot() {
                 } else kirimDanHapus(sender, `❌ Gagal: ${res.data.error}`, WAKTU_5_MENIT);
             }
 
-            // INPUT PENGELUARAN (MULTI-GRUP)
             else if (command === 'catat_pengeluaran') {
                 const kategori = args[0];
                 const nominal = args[1];
