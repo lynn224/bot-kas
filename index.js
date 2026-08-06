@@ -1,3 +1,13 @@
+// === SERVER BOHONGAN UNTUK MENGELABUI RENDER ===
+const http = require('http');
+const port = process.env.PORT || 3000;
+http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('Bot WhatsApp Kas Aktif dan Berjalan!\n');
+}).listen(port, () => {
+    console.log(`Web server menyala di port ${port}`);
+});
+// =============================================
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
 const axios = require('axios');
 const pino = require('pino');
