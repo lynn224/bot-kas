@@ -222,7 +222,7 @@ async function startBot() {
                     
                     let replyText = "📊 *DASHBOARD KAS ORGANISASI*\n\n";
                     replyText += `💵 *Keuangan*\n`;
-                    replyText += `• *Saldo Saat Ini*: ${formatRp(getValue('Saldo Saat Ini'))}\n`;
+                    replyText += `• *Saldo Saat Ini*: ${formatRp(getValue('Saldo'))}\n`;
                     replyText += `• *Total Pemasukan*: ${formatRp(getValue('Total Pemasukan'))}\n`;
                     replyText += `• *Total Pengeluaran*: ${formatRp(getValue('Total Pengeluaran'))}\n`;
                     replyText += `• *Total Tunggakan*: ${formatRp(getValue('Total Tunggakan'))}\n`;
