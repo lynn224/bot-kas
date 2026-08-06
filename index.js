@@ -212,13 +212,16 @@ async function startBot() {
             return kirimDanHapus(sender, helpText, WAKTU_5_MENIT);
         }
 
-        // 2. DASHBOARD
+        // 2. DASHBOARD (Sesuai dengan Kunci Web Kas)
         else if (command === 'dashboard') {
             try {
                 const res = await axios.get(`${API_URL}?action=dashboard`);
                 if (res.data.success) {
                     const d = res.data.data;
-                    const getValue = (label) => d.find(i => i.label === label)?.value || '0';
+                    const getValue = (label) => {
+                        const item = d.find(i => i.label === label);
+                        return item ? item.value : '0';
+                    };
                     
                     let replyText = "📊 *DASHBOARD KAS ORGANISASI*\n\n";
                     replyText += `💵 *Keuangan*\n`;
@@ -226,7 +229,12 @@ async function startBot() {
                     replyText += `• *Total Pemasukan*: ${formatRp(getValue('Total Pemasukan'))}\n`;
                     replyText += `• *Total Pengeluaran*: ${formatRp(getValue('Total Pengeluaran'))}\n`;
                     replyText += `• *Total Tunggakan*: ${formatRp(getValue('Total Tunggakan'))}\n`;
-                    replyText += `• *Kepatuhan Bayar*: ${getValue('Persentase Kepatuhan %')}%\n\n`;
+                    
+                    // Format Kepatuhan Bayar (Desimal ke Persentase)
+                    const rawKepatuhan = getValue('Persentase Kepatuhan Bayar');
+                    const valKepatuhan = rawKepatuhan !== '0' ? (Number(rawKepatuhan) * 100).toFixed(0) + '%' : '-';
+                    replyText += `• *Kepatuhan Bayar*: ${valKepatuhan}\n\n`;
+                    
                     replyText += `👥 *Keanggotaan*\n`;
                     replyText += `• *Anggota Aktif*: ${getValue('Anggota Aktif')} Orang\n`;
                     replyText += `• *Anggota Resign*: ${getValue('Anggota Resign')} Orang\n`;
@@ -238,6 +246,7 @@ async function startBot() {
                 kirimDanHapus(sender, "❌ Gagal memuat dashboard.", WAKTU_5_MENIT);
             }
         }
+
 
         // 3. PEMASUKAN
         else if (command === 'pemasukan') {
