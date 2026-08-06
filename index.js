@@ -17,7 +17,7 @@ const fs = require('fs');
 const API_URL = 'https://script.google.com/macros/s/AKfycbzrgUNXaXz4NGbod6OMqBJ0Ieo0AJgD5kZMIrRUyNL8ey2xhKW0N0J-hXTV5C40VpP67g/exec';
 
 // UBAH BAGIAN INI: Masukkan nomor WA bot Anda dengan awalan 62 (tanpa 0 atau +)
-const NOMOR_BOT = '085956143731'; 
+const NOMOR_BOT = '6285956143731'; 
 
 const WAKTU_5_MENIT = 5 * 60 * 1000;
 const WAKTU_24_JAM = 24 * 60 * 60 * 1000;
