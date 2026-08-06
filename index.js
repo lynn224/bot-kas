@@ -1,13 +1,12 @@
-// === SERVER BOHONGAN UNTUK MENGELABUI RENDER ===
+// === SERVER BOHONGAN UNTUK MENGELABUI RENDER (mencegah auto-kill) ===
 const http = require('http');
 const port = process.env.PORT || 3000;
 http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('Bot WhatsApp Kas Aktif dan Berjalan!\n');
-}).listen(port, () => {
-    console.log(`Web server menyala di port ${port}`);
-});
-// =============================================
+}).listen(port, () => console.log(`Web server aktif di port ${port}`));
+
+// === KODE UTAMA BOT ===
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
 const axios = require('axios');
 const pino = require('pino');
@@ -16,7 +15,7 @@ const fs = require('fs');
 
 const API_URL = 'https://script.google.com/macros/s/AKfycbzrgUNXaXz4NGbod6OMqBJ0Ieo0AJgD5kZMIrRUyNL8ey2xhKW0N0J-hXTV5C40VpP67g/exec';
 
-// UBAH BAGIAN INI: Masukkan nomor WA bot Anda dengan awalan 62 (tanpa 0 atau +)
+// UBAH NOMOR DI BAWAH: Masukkan nomor WA bot Anda dengan awalan 62 (tanpa 0 atau +)
 const NOMOR_BOT = '6285956143731'; 
 
 const WAKTU_5_MENIT = 5 * 60 * 1000;
@@ -24,6 +23,9 @@ const WAKTU_24_JAM = 24 * 60 * 60 * 1000;
 
 const userSessions = {};
 const searchCache = {};
+
+// PENYIMPANAN ANTI-DUPLIKAT PESAN
+const processedMessages = new Set();
 
 // MEMORI PENYIMPANAN MULTI-GRUP
 const GROUPS_FILE = './registered_groups.json';
@@ -49,15 +51,13 @@ async function startBot() {
         auth: state,
         printQRInTerminal: false,
         logger: pino({ level: 'silent' }),
-        browser: ['Ubuntu', 'Chrome', '20.0.04'] // Wajib untuk fitur Pairing Code
+        browser: ['Ubuntu', 'Chrome', '20.0.04']
     });
 
-    // MEMINTA KODE TAUTAN JIKA BELUM LOGIN
     if (!sock.authState.creds.registered) {
         setTimeout(async () => {
             try {
                 let code = await sock.requestPairingCode(NOMOR_BOT);
-                // Memecah kode jadi format ABCD-EFGH agar mudah dibaca
                 code = code?.match(/.{1,4}/g)?.join("-") || code; 
                 console.log('\n==================================================');
                 console.log('  KODE TAUTAN (PAIRING CODE) ANDA: ' + code);
@@ -99,7 +99,7 @@ async function startBot() {
         }
     }
 
-    // CRON JOB MULTI-GRUP (Kirim Pengingat Tanggal 5 ke SEMUA Grup)
+    // CRON JOB MULTI-GRUP (Kirim Pengingat Tanggal 5 Jam 16:00 ke SEMUA Grup)
     cron.schedule('0 16 5 * *', async () => {
         if (registeredGroups.length === 0) return;
         try {
@@ -130,9 +130,19 @@ async function startBot() {
         }
     });
 
-    sock.ev.on('messages.upsert', async ({ messages }) => {
+    sock.ev.on('messages.upsert', async ({ messages, type }) => {
+        if (type !== 'notify') return; // Hanya proses pesan baru real-time
+        
         const msg = messages[0];
         if (!msg.message || msg.key.fromMe) return;
+
+        // FITUR ANTI-DUPLIKAT (Pencegah Balasan Ganda)
+        const msgId = msg.key.id;
+        if (processedMessages.has(msgId)) return;
+        processedMessages.add(msgId);
+        
+        // Hapus ID lama setelah 10 detik agar memori tidak penuh
+        setTimeout(() => processedMessages.delete(msgId), 10000);
 
         const sender = msg.key.remoteJid;
         const text = (msg.message.conversation || msg.message.extendedTextMessage?.text || '').trim();
@@ -144,6 +154,7 @@ async function startBot() {
             saveGroup(sender);
         }
 
+        // RESPON BALASAN ANGKA UNTUK SEARCH CEK NAMA
         if (!text.startsWith('/') && searchCache[sender]) {
             const choice = parseInt(text);
             const list = searchCache[sender];
@@ -165,6 +176,7 @@ async function startBot() {
 
         if (!text.startsWith('/')) return;
 
+        // INSTANT CLEAN: Hapus pesan perintah pengguna di grup
         if (isGroup) {
             sock.sendMessage(sender, { delete: msg.key }).catch(()=>{});
         }
@@ -172,6 +184,7 @@ async function startBot() {
         const args = text.slice(1).trim().split(/ +/);
         const command = args.shift().toLowerCase();
 
+        // 1. MENU
         if (command === 'menu' || command === 'help') {
             const isEditor = !!userSessions[sender];
             let helpText = "📌 *MENU BANTUAN*\n\n";
@@ -199,6 +212,7 @@ async function startBot() {
             return kirimDanHapus(sender, helpText, WAKTU_5_MENIT);
         }
 
+        // 2. DASHBOARD
         else if (command === 'dashboard') {
             try {
                 const res = await axios.get(`${API_URL}?action=dashboard`);
@@ -225,6 +239,7 @@ async function startBot() {
             }
         }
 
+        // 3. PEMASUKAN
         else if (command === 'pemasukan') {
             try {
                 const res = await axios.get(`${API_URL}?action=detailPemasukan`);
@@ -242,6 +257,7 @@ async function startBot() {
             }
         }
 
+        // 4. PENGELUARAN
         else if (command === 'pengeluaran') {
             try {
                 const res = await axios.get(`${API_URL}?action=detailPengeluaran`);
@@ -259,6 +275,7 @@ async function startBot() {
             }
         }
 
+        // 5. CEK NAMA
         else if (command === 'cek') {
             const query = args.join(' ').toLowerCase();
             if (!query) return kirimDanHapus(sender, "Gunakan format: `/cek <nama>`", WAKTU_5_MENIT);
@@ -292,6 +309,7 @@ async function startBot() {
             }
         }
 
+        // 6. MENUNGGAK
         else if (command === 'menunggak') {
             try {
                 const res = await axios.get(`${API_URL}?action=monitoring`);
@@ -312,6 +330,7 @@ async function startBot() {
             }
         }
 
+        // 7. LOGIN EDITOR
         else if (command === 'login') {
             if (isGroup) {
                 return kirimDanHapus(sender, "⚠️ Perintah `/login` wajib via Chat Pribadi (DM)!", WAKTU_5_MENIT);
@@ -334,6 +353,7 @@ async function startBot() {
             }
         }
 
+        // --- PANEL EDITOR ---
         else if (['opsi_editor', 'iuran', 'catat_pengeluaran', 'tambah_anggota', 'edit_anggota', 'set_iuran', 'set_ho', 'ganti_password', 'logout'].includes(command)) {
             const token = userSessions[sender];
             if (!token) return kirimDanHapus(sender, "❌ Akses Ditolak! Login dulu via DM.", WAKTU_5_MENIT);
@@ -361,6 +381,7 @@ async function startBot() {
                 }
             }
 
+            // INPUT IURAN (NOTIFIKASI 24 JAM KE GRUP)
             else if (command === 'iuran') {
                 const nama = args[0];
                 const nominal = args[1];
@@ -386,6 +407,7 @@ async function startBot() {
                 } else kirimDanHapus(sender, `❌ Gagal: ${res.data.error}`, WAKTU_5_MENIT);
             }
 
+            // INPUT PENGELUARAN (NOTIFIKASI 24 JAM KE GRUP)
             else if (command === 'catat_pengeluaran') {
                 const kategori = args[0];
                 const nominal = args[1];
