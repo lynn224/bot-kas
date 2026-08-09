@@ -1,7 +1,7 @@
 {
   "name": "bot-kas",
   "version": "1.0.0",
-  "description": "",
+  "description": "Bot WhatsApp Kas Organisasi",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
@@ -14,7 +14,8 @@
   "dependencies": {
     "@whiskeysockets/baileys": "^7.0.0-rc14",
     "axios": "^1.19.0",
+    "mongodb": "^6.13.0",
     "node-cron": "^4.6.0",
-    "qrcode-terminal": "^0.12.0"
+    "pino": "^9.6.0"
   }
 }
