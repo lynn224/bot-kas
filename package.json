@@ -3,18 +3,15 @@
   "version": "1.0.0",
   "description": "Bot WhatsApp Kas Organisasi",
   "main": "index.js",
+  "type": "module",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "6.7.22",
+    "@whiskeysockets/baileys": "^7.0.0-rc14",
     "axios": "^1.7.9",
     "mongodb": "^6.13.0",
     "node-cron": "^3.0.3",
     "pino": "^9.6.0"
-  },
-  "devDependencies": {
-    "eslint": "^8.57.0",
-    "typescript": "^5.0.0"
   }
 }
