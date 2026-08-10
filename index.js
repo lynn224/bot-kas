@@ -1,5 +1,12 @@
-// === SERVER BOHONGAN UNTUK MENGELABUI RENDER (mencegah auto-kill) ===
-const http = require('http');
+// === SERVER BOHONGAN UNTUK MENGELABUI RENDER ===
+import http from 'http';
+import makeWASocket, { DisconnectReason, initAuthCreds, proto, BufferJSON, fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
+import { MongoClient } from 'mongodb';
+import axios from 'axios';
+import pino from 'pino';
+import cron from 'node-cron';
+import fs from 'fs';
+
 const port = process.env.PORT || 3000;
 http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
@@ -7,19 +14,12 @@ http.createServer((req, res) => {
 }).listen(port, () => console.log(`Web server aktif di port ${port}`));
 
 // === KODE UTAMA BOT ===
-const { default: makeWASocket, DisconnectReason, initAuthCreds, proto, BufferJSON } = require('@whiskeysockets/baileys');
-const { MongoClient } = require('mongodb');
-const axios = require('axios');
-const pino = require('pino');
-const cron = require('node-cron');
-const fs = require('fs');
-
 const API_URL = 'https://script.google.com/macros/s/AKfycbzrgUNXaXz4NGbod6OMqBJ0Ieo0AJgD5kZMIrRUyNL8ey2xhKW0N0J-hXTV5C40VpP67g/exec';
 
-// MONGO URI (Membaca dari Environment Variable Render atau fallback ke URI ini)
+// MONGO URI
 const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://anjass001_db_user:uyXXk6axpyFTMzJf@cluster0.59haly3.mongodb.net/bot_whatsapp?retryWrites=true&w=majority';
 
-// NOMOR BOT WA (Awalan 62 tanpa + atau 0)
+// NOMOR BOT WA
 const NOMOR_BOT = '6285956143731'; 
 
 const WAKTU_5_MENIT = 5 * 60 * 1000;
@@ -45,7 +45,7 @@ function saveGroup(groupId) {
 
 const formatRp = (num) => 'Rp ' + Number(num || 0).toLocaleString('id-ID');
 
-// === HANDLER SESI MONGODB (DENGAN PENANGANAN BUFFER JSON) ===
+// === HANDLER SESI MONGODB ===
 async function useMongoAuthState(collection) {
     const writeData = (data, id) => {
         return collection.updateOne(
@@ -116,22 +116,29 @@ async function startBot() {
     const sessionCollection = db.collection('session_kas');
     console.log('✅ Terhubung ke MongoDB Atlas!');
 
-    // Memuat Sesi dari MongoDB
     const { state, saveCreds } = await useMongoAuthState(sessionCollection);
+    const { version, isLatest } = await fetchLatestBaileysVersion();
+    console.log(`📡 Menggunakan WhatsApp Web v${version.join('.')}, Is Latest: ${isLatest}`);
     
-    // Tutup socket lama jika ada agar tidak bentrok
     if (sock) {
         try { sock.end(undefined); } catch (e) {}
     }
 
-    sock = makeWASocket({
+    // Menggunakan pemanggil default yang aman untuk versi v7
+    const makeSocket = typeof makeWASocket === 'function' ? makeWASocket : makeWASocket.default;
+
+    sock = makeSocket({
+        version, 
         auth: state,
         printQRInTerminal: false,
         logger: pino({ level: 'silent' }),
-        browser: ['Mac OS', 'Chrome', '121.0.0'], // Disesuaikan agar terhindar dari blokir error 405
+        browser: ['Ubuntu', 'Chrome', '120.0.6099.109'],
         connectTimeoutMs: 60000,
         defaultQueryTimeoutMs: 0,
-        keepAliveIntervalMs: 10000
+        keepAliveIntervalMs: 30000,
+        emitOwnEvents: true,
+        markOnlineOnConnect: true,
+        syncFullHistory: false
     });
 
     sock.ev.on('creds.update', saveCreds);
@@ -160,7 +167,6 @@ async function startBot() {
         }
     });
 
-    // MEMINTA PAIRING CODE HANYA JIKA BELUM TERDAFTAR
     if (!sock.authState.creds.registered) {
         setTimeout(async () => {
             try {
@@ -173,7 +179,7 @@ async function startBot() {
                     console.log('==================================================\n');
                 }
             } catch (e) {
-                console.error('⚠️ Gagal meminta kode tautan (Koneksi belum siap). Akan mencoba lagi saat restart.');
+                console.error('⚠️ Gagal meminta kode tautan. Akan mencoba lagi saat restart.', e);
             }
         }, 6000);
     }
@@ -189,7 +195,6 @@ async function startBot() {
         }
     }
 
-    // CRON JOB MULTI-GRUP (Tanggal 5 Jam 16:00)
     cron.schedule('0 16 5 * *', async () => {
         if (registeredGroups.length === 0) return;
         try {
@@ -239,7 +244,6 @@ async function startBot() {
         if (!text) return;
         if (isGroup) saveGroup(sender);
 
-        // RESPON BALASAN ANGKA UNTUK SEARCH CEK NAMA
         if (!text.startsWith('/') && searchCache[sender]) {
             const choice = parseInt(text);
             const list = searchCache[sender];
@@ -268,7 +272,6 @@ async function startBot() {
         const args = text.slice(1).trim().split(/ +/);
         const command = args.shift().toLowerCase();
 
-        // 1. MENU
         if (command === 'menu' || command === 'help') {
             const isEditor = !!userSessions[sender];
             let helpText = "📌 *MENU BANTUAN*\n\n";
@@ -296,7 +299,6 @@ async function startBot() {
             return kirimDanHapus(sender, helpText, WAKTU_5_MENIT);
         }
 
-        // 2. DASHBOARD
         else if (command === 'dashboard') {
             try {
                 const res = await axios.get(`${API_URL}?action=dashboard`);
@@ -330,7 +332,6 @@ async function startBot() {
             }
         }
 
-        // 3. PEMASUKAN
         else if (command === 'pemasukan') {
             try {
                 const res = await axios.get(`${API_URL}?action=detailPemasukan`);
@@ -348,7 +349,6 @@ async function startBot() {
             }
         }
 
-        // 4. PENGELUARAN
         else if (command === 'pengeluaran') {
             try {
                 const res = await axios.get(`${API_URL}?action=detailPengeluaran`);
@@ -366,7 +366,6 @@ async function startBot() {
             }
         }
 
-        // 5. CEK NAMA
         else if (command === 'cek') {
             const query = args.join(' ').toLowerCase();
             if (!query) return kirimDanHapus(sender, "Gunakan format: `/cek <nama>`", WAKTU_5_MENIT);
@@ -400,7 +399,6 @@ async function startBot() {
             }
         }
 
-        // 6. MENUNGGAK
         else if (command === 'menunggak') {
             try {
                 const res = await axios.get(`${API_URL}?action=monitoring`);
@@ -421,7 +419,6 @@ async function startBot() {
             }
         }
 
-        // 7. LOGIN EDITOR
         else if (command === 'login') {
             if (isGroup) {
                 return kirimDanHapus(sender, "⚠️ Perintah `/login` wajib via Chat Pribadi (DM)!", WAKTU_5_MENIT);
@@ -444,7 +441,6 @@ async function startBot() {
             }
         }
 
-        // PANEL EDITOR
         else if (['opsi_editor', 'iuran', 'catat_pengeluaran', 'tambah_anggota', 'edit_anggota', 'set_iuran', 'set_ho', 'ganti_password', 'logout'].includes(command)) {
             const token = userSessions[sender];
             if (!token) return kirimDanHapus(sender, "❌ Akses Ditolak! Login dulu via DM.", WAKTU_5_MENIT);
