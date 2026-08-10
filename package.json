@@ -4,18 +4,17 @@
   "description": "Bot WhatsApp Kas Organisasi",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node index.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs",
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.22",
-    "axios": "^1.19.0",
+    "axios": "^1.7.9",
     "mongodb": "^6.13.0",
-    "node-cron": "^4.6.0",
+    "node-cron": "^3.0.3",
     "pino": "^9.6.0"
+  },
+  "devDependencies": {
+    "eslint": "^8.57.0",
+    "typescript": "^5.0.0"
   }
 }
