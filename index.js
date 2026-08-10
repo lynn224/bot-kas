@@ -16,10 +16,10 @@ const fs = require('fs');
 
 const API_URL = 'https://script.google.com/macros/s/AKfycbzrgUNXaXz4NGbod6OMqBJ0Ieo0AJgD5kZMIrRUyNL8ey2xhKW0N0J-hXTV5C40VpP67g/exec';
 
-// MONGO URI (Akan membaca dari Environment Variable Render atau fallback ke URI ini)
+// MONGO URI (Membaca dari Environment Variable Render atau fallback ke URI ini)
 const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://anjass001_db_user:uyXXk6axpyFTMzJf@cluster0.59haly3.mongodb.net/bot_whatsapp?retryWrites=true&w=majority';
 
-// UBAH NOMOR DI BAWAH: Masukkan nomor WA bot Anda dengan awalan 62 (tanpa 0 atau +)
+// NOMOR BOT WA (Awalan 62 tanpa + atau 0)
 const NOMOR_BOT = '6285956143731'; 
 
 const WAKTU_5_MENIT = 5 * 60 * 1000;
@@ -27,11 +27,8 @@ const WAKTU_24_JAM = 24 * 60 * 60 * 1000;
 
 const userSessions = {};
 const searchCache = {};
-
-// PENYIMPANAN ANTI-DUPLIKAT PESAN
 const processedMessages = new Set();
 
-// MEMORI PENYIMPANAN MULTI-GRUP
 const GROUPS_FILE = './registered_groups.json';
 let registeredGroups = [];
 
@@ -48,7 +45,7 @@ function saveGroup(groupId) {
 
 const formatRp = (num) => 'Rp ' + Number(num || 0).toLocaleString('id-ID');
 
-// === HANDLER SESI MONGODB (FIXED BUFFER JSON) ===
+// === HANDLER SESI MONGODB (DENGAN PENANGANAN BUFFER JSON) ===
 async function useMongoAuthState(collection) {
     const writeData = (data, id) => {
         return collection.updateOne(
@@ -109,6 +106,8 @@ async function useMongoAuthState(collection) {
     };
 }
 
+let sock = null;
+
 async function startBot() {
     console.log('Menghubungkan ke MongoDB Atlas...');
     const mongoClient = new MongoClient(MONGO_URI);
@@ -120,46 +119,64 @@ async function startBot() {
     // Memuat Sesi dari MongoDB
     const { state, saveCreds } = await useMongoAuthState(sessionCollection);
     
-    const sock = makeWASocket({
+    // Tutup socket lama jika ada agar tidak bentrok
+    if (sock) {
+        try { sock.end(undefined); } catch (e) {}
+    }
+
+    sock = makeWASocket({
         auth: state,
         printQRInTerminal: false,
         logger: pino({ level: 'silent' }),
-        browser: ['Ubuntu', 'Chrome', '20.0.04']
+        browser: ['Ubuntu', 'Chrome', '20.0.04'],
+        connectTimeoutMs: 60000,
+        defaultQueryTimeoutMs: 0,
+        keepAliveIntervalMs: 10000
     });
-
-    if (!sock.authState.creds.registered) {
-        setTimeout(async () => {
-            try {
-                let code = await sock.requestPairingCode(NOMOR_BOT);
-                code = code?.match(/.{1,4}/g)?.join("-") || code; 
-                console.log('\n==================================================');
-                console.log('  KODE TAUTAN (PAIRING CODE) ANDA: ' + code);
-                console.log('  Masukkan kode ini di aplikasi WhatsApp HP Anda.');
-                console.log('==================================================\n');
-            } catch (e) {
-                console.error('Gagal mendapatkan kode tautan:', e);
-            }
-        }, 3000);
-    }
 
     sock.ev.on('creds.update', saveCreds);
 
     sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect } = update;
+
         if (connection === 'close') {
-            const shouldReconnect = (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
+            const statusCode = (lastDisconnect?.error)?.output?.statusCode;
+            const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+            
+            console.log(`Koneksi terputus (Status Code: ${statusCode})...`);
+
             if (shouldReconnect) {
-                console.log('Koneksi terputus, mencoba menghubungkan ulang...');
+                console.log('Mencoba menghubungkan ulang dalam 5 detik...');
                 setTimeout(startBot, 5000);
             } else {
-                console.log('⚠️ Sesi terputus (Logged Out). Silakan hapus data sesi di MongoDB jika ingin menautkan ulang.');
+                console.log('⚠️ Sesi terputus (Logged Out). Hapus data di MongoDB jika ingin menautkan ulang.');
             }
+        } else if (connection === 'connecting') {
+            console.log('🔄 Menginisialisasi koneksi ke server WhatsApp...');
         } else if (connection === 'open') {
             console.log('\n==============================================');
             console.log('  ✅ BOT WHATSAPP KAS AKTIF & SIAP PAKAI!');
             console.log('==============================================\n');
         }
     });
+
+    // MEMINTA PAIRING CODE HANYA JIKA BELUM TERDAFTAR
+    if (!sock.authState.creds.registered) {
+        setTimeout(async () => {
+            try {
+                if (sock && !sock.authState.creds.registered) {
+                    let code = await sock.requestPairingCode(NOMOR_BOT);
+                    code = code?.match(/.{1,4}/g)?.join("-") || code; 
+                    console.log('\n==================================================');
+                    console.log('  🔑 KODE TAUTAN (PAIRING CODE) ANDA: ' + code);
+                    console.log('  Segera masukkan kode ini di WhatsApp HP Anda!');
+                    console.log('==================================================\n');
+                }
+            } catch (e) {
+                console.error('⚠️ Gagal meminta kode tautan (Koneksi belum siap). Akan mencoba lagi saat restart.');
+            }
+        }, 6000);
+    }
 
     async function kirimDanHapus(jid, text, delayMs) {
         try {
@@ -172,7 +189,7 @@ async function startBot() {
         }
     }
 
-    // CRON JOB MULTI-GRUP (Kirim Pengingat Tanggal 5 Jam 16:00 ke SEMUA Grup)
+    // CRON JOB MULTI-GRUP (Tanggal 5 Jam 16:00)
     cron.schedule('0 16 5 * *', async () => {
         if (registeredGroups.length === 0) return;
         try {
@@ -209,7 +226,6 @@ async function startBot() {
         const msg = messages[0];
         if (!msg.message || msg.key.fromMe) return;
 
-        // FITUR ANTI-DUPLIKAT (Pencegah Balasan Ganda)
         const msgId = msg.key.id;
         if (processedMessages.has(msgId)) return;
         processedMessages.add(msgId);
@@ -221,10 +237,7 @@ async function startBot() {
         const isGroup = sender.endsWith('@g.us');
 
         if (!text) return;
-
-        if (isGroup) {
-            saveGroup(sender);
-        }
+        if (isGroup) saveGroup(sender);
 
         // RESPON BALASAN ANGKA UNTUK SEARCH CEK NAMA
         if (!text.startsWith('/') && searchCache[sender]) {
@@ -248,7 +261,6 @@ async function startBot() {
 
         if (!text.startsWith('/')) return;
 
-        // INSTANT CLEAN: Hapus pesan perintah pengguna di grup
         if (isGroup) {
             sock.sendMessage(sender, { delete: msg.key }).catch(()=>{});
         }
