@@ -128,7 +128,7 @@ async function startBot() {
         auth: state,
         printQRInTerminal: false,
         logger: pino({ level: 'silent' }),
-        browser: ['Ubuntu', 'Chrome', '20.0.04'],
+        browser: ['Mac OS', 'Chrome', '121.0.0'], // Disesuaikan agar terhindar dari blokir error 405
         connectTimeoutMs: 60000,
         defaultQueryTimeoutMs: 0,
         keepAliveIntervalMs: 10000
