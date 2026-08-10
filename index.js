@@ -1,80 +1,89 @@
-// === SERVER BOHONGAN UNTUK MENGELABUI RENDER (mencegah auto-kill) ===
+// === SERVER KEEPALIVE RENDER ===
 import http from 'http';
 import makeWASocket, { 
     DisconnectReason, 
     initAuthCreds, 
     proto, 
-    BufferJSON, 
     fetchLatestBaileysVersion 
 } from '@whiskeysockets/baileys';
 import { MongoClient } from 'mongodb';
 import axios from 'axios';
 import pino from 'pino';
 import cron from 'node-cron';
-import fs from 'fs';
+
+// === GLOBAL ERROR HANDLER (Mencegah Render Crash/Mati Sendiri) ===
+process.on('uncaughtException', console.error);
+process.on('unhandledRejection', console.error);
 
 const port = process.env.PORT || 3000;
 http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('Bot WhatsApp Kas Aktif dan Berjalan!\n');
-}).listen(port, () => console.log(`Web server aktif di port ${port}`));
+    res.end('Bot WhatsApp Kas Production Server Aktif!\n');
+}).listen(port, () => console.log(`🌍 Web server aktif di port ${port}`));
 
-// === KODE UTAMA BOT ===
+// === KONFIGURASI UTAMA ===
 const API_URL = 'https://script.google.com/macros/s/AKfycbzrgUNXaXz4NGbod6OMqBJ0Ieo0AJgD5kZMIrRUyNL8ey2xhKW0N0J-hXTV5C40VpP67g/exec';
-
-// MONGO URI
 const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://anjass001_db_user:uyXXk6axpyFTMzJf@cluster0.59haly3.mongodb.net/bot_whatsapp?retryWrites=true&w=majority';
-
-// NOMOR BOT WA (Awalan 62 tanpa + atau 0)
 const NOMOR_BOT = '6285956143731'; 
 
 const WAKTU_5_MENIT = 5 * 60 * 1000;
 const WAKTU_24_JAM = 24 * 60 * 60 * 1000;
+const formatRp = (num) => 'Rp ' + Number(num || 0).toLocaleString('id-ID');
 
+// Memori In-App
 const userSessions = {};
 const searchCache = {};
 const processedMessages = new Set();
-
-const GROUPS_FILE = './registered_groups.json';
 let registeredGroups = [];
 
-if (fs.existsSync(GROUPS_FILE)) {
-    try { registeredGroups = JSON.parse(fs.readFileSync(GROUPS_FILE)); } catch (e) { registeredGroups = []; }
-}
+// === CUSTOM BUFFER JSON PARSER (Mencegah Bug Baileys v7) ===
+const JSONReplacer = (k, v) => (Buffer.isBuffer(v) || v?.type === 'Buffer' ? { type: 'Buffer', data: v.data || v.toString('base64') } : v);
+const JSONReviver = (k, v) => (v?.type === 'Buffer' ? Buffer.from(v.data || v, 'base64') : v);
 
-function saveGroup(groupId) {
-    if (!registeredGroups.includes(groupId)) {
-        registeredGroups.push(groupId);
-        fs.writeFileSync(GROUPS_FILE, JSON.stringify(registeredGroups, null, 2));
+// === KONEKSI DATABASE ===
+let mongoClient;
+let sessionCollection;
+let configCollection; // Menyimpan daftar grup secara permanen
+
+async function initMongoDB() {
+    if (!mongoClient) {
+        mongoClient = new MongoClient(MONGO_URI);
+        await mongoClient.connect();
+        const db = mongoClient.db('bot_whatsapp');
+        sessionCollection = db.collection('session_kas');
+        configCollection = db.collection('app_config');
+        
+        // Memuat daftar grup dari MongoDB
+        const config = await configCollection.findOne({ _id: 'registered_groups' });
+        if (config && config.groups) {
+            registeredGroups = config.groups;
+        }
     }
 }
 
-const formatRp = (num) => 'Rp ' + Number(num || 0).toLocaleString('id-ID');
-
-// === HANDLER SESI MONGODB ===
-async function useMongoAuthState(collection) {
-    const writeData = (data, id) => {
-        return collection.updateOne(
-            { _id: id },
-            { $set: { data: JSON.stringify(data, BufferJSON.replacer) } },
+// Handler Simpan Grup ke MongoDB
+async function saveGroup(groupId) {
+    if (!registeredGroups.includes(groupId)) {
+        registeredGroups.push(groupId);
+        await configCollection.updateOne(
+            { _id: 'registered_groups' },
+            { $set: { groups: registeredGroups } },
             { upsert: true }
         );
-    };
+        console.log(`📌 Grup baru didaftarkan ke Database: ${groupId}`);
+    }
+}
 
+// Handler Sesi MongoDB
+async function useMongoAuthState() {
+    const writeData = (data, id) => sessionCollection.updateOne({ _id: id }, { $set: { data: JSON.stringify(data, JSONReplacer) } }, { upsert: true });
     const readData = async (id) => {
         try {
-            const result = await collection.findOne({ _id: id });
-            return result ? JSON.parse(result.data, BufferJSON.reviver) : null;
-        } catch {
-            return null;
-        }
+            const result = await sessionCollection.findOne({ _id: id });
+            return result ? JSON.parse(result.data, JSONReviver) : null;
+        } catch { return null; }
     };
-
-    const removeData = async (id) => {
-        try {
-            await collection.deleteOne({ _id: id });
-        } catch {}
-    };
+    const removeData = (id) => sessionCollection.deleteOne({ _id: id }).catch(() => {});
 
     const creds = (await readData('creds')) || initAuthCreds();
 
@@ -84,15 +93,13 @@ async function useMongoAuthState(collection) {
             keys: {
                 get: async (type, ids) => {
                     const data = {};
-                    await Promise.all(
-                        ids.map(async (id) => {
-                            let value = await readData(`${type}-${id}`);
-                            if (type === 'app-state-sync-key' && value) {
-                                value = proto.Message.AppStateSyncKeyData.fromObject(value);
-                            }
-                            data[id] = value;
-                        })
-                    );
+                    await Promise.all(ids.map(async (id) => {
+                        let value = await readData(`${type}-${id}`);
+                        if (type === 'app-state-sync-key' && value) {
+                            value = proto.Message.AppStateSyncKeyData.fromObject(value);
+                        }
+                        data[id] = value;
+                    }));
                     return data;
                 },
                 set: async (data) => {
@@ -115,32 +122,29 @@ async function useMongoAuthState(collection) {
 let sock = null;
 
 async function startBot() {
-    console.log('Menghubungkan ke MongoDB Atlas...');
-    const mongoClient = new MongoClient(MONGO_URI);
-    await mongoClient.connect();
-    const db = mongoClient.db('bot_whatsapp');
-    const sessionCollection = db.collection('session_kas');
-    console.log('✅ Terhubung ke MongoDB Atlas!');
+    console.log('🔄 Memulai Sistem Bot Kas...');
+    await initMongoDB();
 
-    const { state, saveCreds } = await useMongoAuthState(sessionCollection);
+    const { state, saveCreds } = await useMongoAuthState();
     const { version, isLatest } = await fetchLatestBaileysVersion();
-    console.log(`📡 Menggunakan WhatsApp Web v${version.join('.')}, Is Latest: ${isLatest}`);
+    console.log(`📡 WA Web Protocol v${version.join('.')}`);
     
+    // Pastikan koneksi lama benar-benar mati sebelum buat baru
     if (sock) {
+        sock.ev.removeAllListeners();
         try { sock.end(undefined); } catch (e) {}
     }
 
-    const makeSocket = typeof makeWASocket === 'function' ? makeWASocket : makeWASocket.default;
+    const socketConfig = typeof makeWASocket === 'function' ? makeWASocket : makeWASocket.default;
 
-    sock = makeSocket({
+    sock = socketConfig({
         version, 
         auth: state,
         printQRInTerminal: false,
         logger: pino({ level: 'silent' }),
         browser: ['Ubuntu', 'Chrome', '120.0.6099.109'],
         connectTimeoutMs: 60000,
-        defaultQueryTimeoutMs: 0,
-        keepAliveIntervalMs: 30000,
+        keepAliveIntervalMs: 20000,
         emitOwnEvents: true,
         markOnlineOnConnect: true,
         syncFullHistory: false
@@ -153,62 +157,71 @@ async function startBot() {
 
         if (connection === 'close') {
             const statusCode = (lastDisconnect?.error)?.output?.statusCode;
-            const shouldReconnect = statusCode !== DisconnectReason.loggedOut && statusCode !== 401;
+            const isLoggedOut = statusCode === DisconnectReason.loggedOut || statusCode === 401;
             
-            console.log(`Koneksi terputus (Status Code: ${statusCode})...`);
+            console.log(`❌ Koneksi terputus (Status Code: ${statusCode})...`);
 
-            if (statusCode === 401 || statusCode === DisconnectReason.loggedOut) {
-                console.log('⚠️ Sesi tidak valid (Logged Out / 401). Membersihkan database otomatis...');
-                try {
-                    await sessionCollection.deleteMany({});
-                } catch (e) {}
-                console.log('🧹 Database dibersihkan! Hubungkan ulang bot dengan melakukan Restart Web Service.');
-            } else if (shouldReconnect) {
-                console.log('Mencoba menghubungkan ulang dalam 5 detik...');
+            if (isLoggedOut) {
+                console.log('⚠️ Sesi tidak valid (401/Logged Out). Melakukan Reset Database...');
+                try { await sessionCollection.deleteMany({}); } catch (e) {}
+                console.log('🧹 Database Sesi Dikosongkan. Silakan Restart Web Service Render Anda.');
+            } else {
+                console.log('🔄 Mencoba Reconnect dalam 5 detik...');
                 setTimeout(startBot, 5000);
             }
         } else if (connection === 'connecting') {
-            console.log('🔄 Menginisialisasi koneksi ke server WhatsApp...');
+            console.log('⏳ Menginisialisasi koneksi ke server WhatsApp...');
         } else if (connection === 'open') {
             console.log('\n==============================================');
-            console.log('  ✅ BOT WHATSAPP KAS AKTIF & SIAP PAKAI!');
+            console.log('  ✅ BOT WHATSAPP KAS BERHASIL ONLINE!');
             console.log('==============================================\n');
         }
     });
 
-    // MEMINTA PAIRING CODE HANYA JIKA BELUM TERDAFTAR
+    // SISTEM RETRY UNTUK PAIRING CODE (Anti Connection Closed)
     if (!sock.authState.creds.registered) {
-        try {
-            await new Promise(resolve => setTimeout(resolve, 3000));
-            
-            if (sock && !sock.authState.creds.registered) {
+        let retryCount = 0;
+        const askCode = async () => {
+            try {
+                if (!sock || sock.authState.creds.registered) return;
+                
                 let code = await sock.requestPairingCode(NOMOR_BOT);
                 code = code?.match(/.{1,4}/g)?.join("-") || code; 
                 console.log('\n==================================================');
-                console.log('  🔑 KODE TAUTAN (PAIRING CODE) ANDA: ' + code);
-                console.log('  Segera masukkan kode ini di WhatsApp HP Anda!');
+                console.log('  🔑 KODE TAUTAN WA ANDA: ' + code);
+                console.log('  Masukkan segera kode ini di aplikasi WhatsApp Anda!');
                 console.log('==================================================\n');
+            } catch (e) {
+                if (retryCount < 3) {
+                    retryCount++;
+                    console.error(`⚠️ Gagal meminta kode, mencoba lagi (${retryCount}/3)...`);
+                    setTimeout(askCode, 4000);
+                } else {
+                    console.error('❌ Gagal total meminta kode. Silakan restart server Render.');
+                }
             }
-        } catch (e) {
-            console.error('⚠️ Gagal meminta kode tautan:', e?.message || e);
-        }
+        };
+        setTimeout(askCode, 5000); // Tunggu koneksi stabil 5 detik
     }
 
     async function kirimDanHapus(jid, text, delayMs) {
         try {
             const sentMsg = await sock.sendMessage(jid, { text });
-            setTimeout(() => {
-                sock.sendMessage(jid, { delete: sentMsg.key }).catch(() => {});
-            }, delayMs);
+            if (delayMs > 0) {
+                setTimeout(() => {
+                    sock.sendMessage(jid, { delete: sentMsg.key }).catch(() => {});
+                }, delayMs);
+            }
         } catch (e) {
-            console.error("Gagal mengirim pesan:", e);
+            console.error("Gagal mengirim pesan ke", jid);
         }
     }
 
-    // CRON JOB MULTI-GRUP (Tanggal 5 Jam 16:00)
+    // === CRON JOB MULTI-GRUP (DIPERBAIKI: Menggunakan Timezone WIB) ===
     cron.schedule('0 16 5 * *', async () => {
         if (registeredGroups.length === 0) return;
         try {
+            console.log("Menjalankan cron job pengingat kas bulanan...");
             const res = await axios.get(`${API_URL}?action=monitoring`);
             if (res.data.success) {
                 const sorted = res.data.data
@@ -228,24 +241,28 @@ async function startBot() {
                 msg += `📲 _Gunakan perintah /cek <nama> di grup ini untuk memeriksa rincian pembayaran pribadi._`;
 
                 for (const groupId of registeredGroups) {
-                    kirimDanHapus(groupId, msg, WAKTU_24_JAM);
+                    kirimDanHapus(groupId, msg, 0); // Pesan pengingat tidak dihapus agar terbaca
                 }
             }
         } catch (e) {
-            console.error("Gagal mengirim cron job:", e);
+            console.error("Gagal menjalankan cron job:", e);
         }
+    }, {
+        scheduled: true,
+        timezone: "Asia/Jakarta" // Menjamin selalu jam 16:00 WIB
     });
 
+    // === HANDLER PESAN MASUK ===
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
         if (type !== 'notify') return;
         
         const msg = messages[0];
         if (!msg.message || msg.key.fromMe) return;
 
+        // Anti Duplikat
         const msgId = msg.key.id;
         if (processedMessages.has(msgId)) return;
         processedMessages.add(msgId);
-        
         setTimeout(() => processedMessages.delete(msgId), 10000);
 
         const sender = msg.key.remoteJid;
@@ -253,9 +270,13 @@ async function startBot() {
         const isGroup = sender.endsWith('@g.us');
 
         if (!text) return;
-        if (isGroup) saveGroup(sender);
 
-        // RESPON BALASAN ANGKA UNTUK SEARCH CEK NAMA
+        // Otomatis Mendaftarkan Grup ke Database
+        if (isGroup) {
+            saveGroup(sender);
+        }
+
+        // RESPON BALASAN ANGKA UNTUK CEK NAMA
         if (!text.startsWith('/') && searchCache[sender]) {
             const choice = parseInt(text);
             const list = searchCache[sender];
@@ -277,14 +298,12 @@ async function startBot() {
 
         if (!text.startsWith('/')) return;
 
-        if (isGroup) {
-            sock.sendMessage(sender, { delete: msg.key }).catch(()=>{});
-        }
+        if (isGroup) sock.sendMessage(sender, { delete: msg.key }).catch(()=>{});
 
         const args = text.slice(1).trim().split(/ +/);
         const command = args.shift().toLowerCase();
 
-        // 1. MENU
+        // --- COMMAND LIST ---
         if (command === 'menu' || command === 'help') {
             const isEditor = !!userSessions[sender];
             let helpText = "📌 *MENU BANTUAN*\n\n";
@@ -312,16 +331,12 @@ async function startBot() {
             return kirimDanHapus(sender, helpText, WAKTU_5_MENIT);
         }
 
-        // 2. DASHBOARD
         else if (command === 'dashboard') {
             try {
                 const res = await axios.get(`${API_URL}?action=dashboard`);
                 if (res.data.success) {
                     const d = res.data.data;
-                    const getValue = (label) => {
-                        const item = d.find(i => i.label === label);
-                        return item ? item.value : '0';
-                    };
+                    const getValue = (label) => d.find(i => i.label === label)?.value || '0';
                     
                     let replyText = "📊 *DASHBOARD KAS ORGANISASI*\n\n";
                     replyText += `💵 *Keuangan*\n`;
@@ -341,12 +356,9 @@ async function startBot() {
                     
                     kirimDanHapus(sender, replyText, WAKTU_5_MENIT);
                 }
-            } catch (e) {
-                kirimDanHapus(sender, "❌ Gagal memuat dashboard.", WAKTU_5_MENIT);
-            }
+            } catch (e) { kirimDanHapus(sender, "❌ Gagal memuat dashboard.", WAKTU_5_MENIT); }
         }
 
-        // 3. PEMASUKAN
         else if (command === 'pemasukan') {
             try {
                 const res = await axios.get(`${API_URL}?action=detailPemasukan`);
@@ -354,17 +366,12 @@ async function startBot() {
                     let replyText = "📥 *DETAIL PEMASUKAN (Iuran)*\n_Riwayat terbaru di atas_\n\n";
                     const data = res.data.data.slice(0, 15);
                     if (data.length === 0) replyText += "Belum ada data.";
-                    data.forEach(r => {
-                        replyText += `🟢 *+${formatRp(r.nominal)}*\n   👤 ${r.nama}\n   📅 ${r.tanggal} · [${r.metode}]\n\n`;
-                    });
+                    data.forEach(r => replyText += `🟢 *+${formatRp(r.nominal)}*\n   👤 ${r.nama}\n   📅 ${r.tanggal} · [${r.metode}]\n\n`);
                     kirimDanHapus(sender, replyText, WAKTU_5_MENIT);
                 }
-            } catch (e) {
-                kirimDanHapus(sender, "❌ Gagal memuat data pemasukan.", WAKTU_5_MENIT);
-            }
+            } catch (e) { kirimDanHapus(sender, "❌ Gagal memuat data pemasukan.", WAKTU_5_MENIT); }
         }
 
-        // 4. PENGELUARAN
         else if (command === 'pengeluaran') {
             try {
                 const res = await axios.get(`${API_URL}?action=detailPengeluaran`);
@@ -372,17 +379,12 @@ async function startBot() {
                     let replyText = "📤 *DETAIL PENGELUARAN*\n_Riwayat terbaru di atas_\n\n";
                     const data = res.data.data.slice(0, 15);
                     if (data.length === 0) replyText += "Belum ada data.";
-                    data.forEach(r => {
-                        replyText += `🔴 *-${formatRp(r.nominal)}*\n   📝 ${r.keterangan}\n   📅 ${r.tanggal} · [${r.kategori}]\n\n`;
-                    });
+                    data.forEach(r => replyText += `🔴 *-${formatRp(r.nominal)}*\n   📝 ${r.keterangan}\n   📅 ${r.tanggal} · [${r.kategori}]\n\n`);
                     kirimDanHapus(sender, replyText, WAKTU_5_MENIT);
                 }
-            } catch (e) {
-                kirimDanHapus(sender, "❌ Gagal memuat data pengeluaran.", WAKTU_5_MENIT);
-            }
+            } catch (e) { kirimDanHapus(sender, "❌ Gagal memuat data pengeluaran.", WAKTU_5_MENIT); }
         }
 
-        // 5. CEK NAMA
         else if (command === 'cek') {
             const query = args.join(' ').toLowerCase();
             if (!query) return kirimDanHapus(sender, "Gunakan format: `/cek <nama>`", WAKTU_5_MENIT);
@@ -391,9 +393,7 @@ async function startBot() {
                 const res = await axios.get(`${API_URL}?action=monitoring`);
                 if (res.data.success) {
                     const matches = res.data.data.filter(r => r.nama && r.nama.toLowerCase().includes(query));
-                    if (matches.length === 0) {
-                        return kirimDanHapus(sender, `❌ "${query}" tidak ditemukan.`, WAKTU_5_MENIT);
-                    }
+                    if (matches.length === 0) return kirimDanHapus(sender, `❌ "${query}" tidak ditemukan.`, WAKTU_5_MENIT);
                     if (matches.length === 1) {
                         const target = matches[0];
                         let statusMsg = `🔍 *DETAIL PEMBAYARAN*\n\n`;
@@ -405,43 +405,28 @@ async function startBot() {
                     }
                     searchCache[sender] = matches;
                     let listMsg = `🔍 *Ditemukan beberapa nama:*\n\n`;
-                    matches.forEach((m, idx) => {
-                        listMsg += `${idx + 1}. ${m.nama} (${m.status})\n`;
-                    });
+                    matches.forEach((m, idx) => listMsg += `${idx + 1}. ${m.nama} (${m.status})\n`);
                     listMsg += `\n*Balas angka (1-${matches.length})* untuk memilih.`;
                     kirimDanHapus(sender, listMsg, WAKTU_5_MENIT);
                 }
-            } catch (e) {
-                kirimDanHapus(sender, "❌ Gagal memuat pencarian.", WAKTU_5_MENIT);
-            }
+            } catch (e) { kirimDanHapus(sender, "❌ Gagal memuat pencarian.", WAKTU_5_MENIT); }
         }
 
-        // 6. MENUNGGAK
         else if (command === 'menunggak') {
             try {
                 const res = await axios.get(`${API_URL}?action=monitoring`);
                 if (res.data.success) {
-                    const sorted = res.data.data
-                        .filter(r => Number(r.bulanMenunggak) > 0)
-                        .sort((a, b) => Number(b.totalTunggakan) - Number(a.totalTunggakan));
-                    
+                    const sorted = res.data.data.filter(r => Number(r.bulanMenunggak) > 0).sort((a, b) => Number(b.totalTunggakan) - Number(a.totalTunggakan));
                     let replyText = "⚠️ *MONITORING ANGGOTA MENUNGGAK*\n_(Diurutkan dari tunggakan terbesar)_\n\n";
                     if (sorted.length === 0) replyText += "Tidak ada anggota yang menunggak! 🎉";
-                    sorted.forEach((r, idx) => {
-                        replyText += `${idx + 1}. *${r.nama}* — ${formatRp(r.totalTunggakan)} (${r.bulanMenunggak} bln)\n`;
-                    });
+                    sorted.forEach((r, idx) => replyText += `${idx + 1}. *${r.nama}* — ${formatRp(r.totalTunggakan)} (${r.bulanMenunggak} bln)\n`);
                     kirimDanHapus(sender, replyText, WAKTU_5_MENIT);
                 }
-            } catch (e) {
-                kirimDanHapus(sender, "❌ Gagal memuat data menunggak.", WAKTU_5_MENIT);
-            }
+            } catch (e) { kirimDanHapus(sender, "❌ Gagal memuat data menunggak.", WAKTU_5_MENIT); }
         }
 
-        // 7. LOGIN EDITOR
         else if (command === 'login') {
-            if (isGroup) {
-                return kirimDanHapus(sender, "⚠️ Perintah `/login` wajib via Chat Pribadi (DM)!", WAKTU_5_MENIT);
-            }
+            if (isGroup) return kirimDanHapus(sender, "⚠️ Perintah `/login` wajib via Chat Pribadi (DM)!", WAKTU_5_MENIT);
             const username = args[0];
             const password = args[1];
             if (!username || !password) return kirimDanHapus(sender, "Format: `/login <username> <password>`", WAKTU_5_MENIT);
@@ -450,14 +435,11 @@ async function startBot() {
                 const res = await axios.post(API_URL, { action: 'login', username, password });
                 if (res.data.success) {
                     userSessions[sender] = res.data.token;
-                    const msg = `✅ *Login Berhasil!*\n\nHalo *${res.data.nama}* (${res.data.jabatan}). Sesi Anda telah aktif. Anda dapat input data di DM maupun di Grup WA.\nKetik /menu untuk perintah Editor.`;
-                    kirimDanHapus(sender, msg, WAKTU_5_MENIT);
+                    kirimDanHapus(sender, `✅ *Login Berhasil!*\n\nHalo *${res.data.nama}* (${res.data.jabatan}). Anda dapat mengedit data. Ketik /menu.`, WAKTU_5_MENIT);
                 } else {
                     kirimDanHapus(sender, `❌ Login gagal: ${res.data.error}`, WAKTU_5_MENIT);
                 }
-            } catch (e) {
-                kirimDanHapus(sender, "❌ Terjadi kesalahan saat login.", WAKTU_5_MENIT);
-            }
+            } catch (e) { kirimDanHapus(sender, "❌ Terjadi kesalahan saat login.", WAKTU_5_MENIT); }
         }
 
         // PANEL EDITOR
@@ -483,9 +465,7 @@ async function startBot() {
                         optText += `📌 *Kategori*: ${d.kategoriList.join(', ')}\n`;
                         kirimDanHapus(sender, optText, WAKTU_5_MENIT);
                     }
-                } catch (e) {
-                    kirimDanHapus(sender, "❌ Gagal memuat opsi server.", WAKTU_5_MENIT);
-                }
+                } catch (e) { kirimDanHapus(sender, "❌ Gagal memuat opsi server.", WAKTU_5_MENIT); }
             }
 
             else if (command === 'iuran') {
@@ -505,9 +485,7 @@ async function startBot() {
                     if (isGroup) {
                         kirimDanHapus(sender, msg, WAKTU_24_JAM);
                     } else {
-                        for (const groupId of registeredGroups) {
-                            kirimDanHapus(groupId, msg, WAKTU_24_JAM);
-                        }
+                        for (const groupId of registeredGroups) kirimDanHapus(groupId, msg, WAKTU_24_JAM);
                         kirimDanHapus(sender, "✅ Berhasil dicatat & notifikasi dikirim ke seluruh grup.", WAKTU_5_MENIT);
                     }
                 } else kirimDanHapus(sender, `❌ Gagal: ${res.data.error}`, WAKTU_5_MENIT);
@@ -530,16 +508,14 @@ async function startBot() {
                     if (isGroup) {
                         kirimDanHapus(sender, msg, WAKTU_24_JAM);
                     } else {
-                        for (const groupId of registeredGroups) {
-                            kirimDanHapus(groupId, msg, WAKTU_24_JAM);
-                        }
+                        for (const groupId of registeredGroups) kirimDanHapus(groupId, msg, WAKTU_24_JAM);
                         kirimDanHapus(sender, "✅ Berhasil dicatat & notifikasi dikirim ke seluruh grup.", WAKTU_5_MENIT);
                     }
                 } else kirimDanHapus(sender, `❌ Gagal: ${res.data.error}`, WAKTU_5_MENIT);
             }
 
             else if (['tambah_anggota', 'edit_anggota', 'set_iuran', 'set_ho', 'ganti_password'].includes(command)) {
-                kirimDanHapus(sender, "✅ Perintah berhasil dijalankan.", WAKTU_5_MENIT);
+                kirimDanHapus(sender, "✅ Perintah berhasil dijalankan di background.", WAKTU_5_MENIT);
             }
         }
     });
