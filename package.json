@@ -8,7 +8,7 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "^latest",
+    "@whiskeysockets/baileys": "latest",
     "axios": "^1.7.9",
     "mongodb": "^6.13.0",
     "node-cron": "^3.0.3",
